@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Snake Game with AI</title>
+    <style>
+        body {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background-color: #f0f0f0;
+        }
+
+        h1 {
+            margin-bottom: 20px;
+        }
+
+        canvas {
+            border: 1px solid #000;
+            background-color: #fff;
+        }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.0.0/dist/tf.min.js"></script>
+</head>
+<body>
+    <h1>Snake Game with AI</h1>
+    <canvas id="gameCanvas" width="400" height="400"></canvas>
+    <script>
+        const canvas = document.getElementById("gameCanvas");
+        const ctx = canvas.getContext("2d");
+
+        const gridSize = 20;
+        const tileCount = canvas.width / gridSize;
+
+        let snake = [{ x: 10, y: 10 }];
+        let direction = { x: 0, y: 0 };
+        let food = { x: 5, y: 5 };
+        let score = 0;
+        let gameOver = false;
+
+        // Neural Network
+        const model = tf.sequential();
+        model.add(tf.layers.dense({ units: 24, inputShape: [4], activation: 'relu' }));
+        model.add(tf.layers.dense({ units: 24, activation: 'relu' }));
+        model.add(tf.layers.dense({ units: 4, activation: 'linear' }));
+        model.compile({ optimizer: tf.train.adam(0.001), loss: 'meanSquaredError' });
+
+        // Hyperparameters
+        const gamma = 0.95; // Discount factor
+        let epsilon = 1.0; // Exploration rate
+        const epsilonMin = 0.01;
+        const epsilonDecay = 0.995;
+
+        // Helper functions
+        function getState() {
+            const head = snake[0];
+            return tf.tensor2d([
+                [head.x / tileCount, head.y / tileCount, food.x / tileCount, food.y / tileCount]
+            ]);
+        }
+
+        function chooseAction(state) {
+            if (Math.random() < epsilon) {
+                return Math.floor(Math.random() * 4); // Random action (0-3)
+            } else {
+                return tf.tidy(() => {
+                    const prediction = model.predict(state);
+                    return prediction.argMax(1).dataSync()[0]; // Best action
+                });
+            }
+        }
+
+        function takeAction(action) {
+            switch (action) {
+                case 0: direction = { x: -1, y: 0 }; break; // Left
+                case 1: direction = { x: 1, y: 0 }; break;  // Right
+                case 2: direction = { x: 0, y: -1 }; break; // Up
+                case 3: direction = { x: 0, y: 1 }; break;  // Down
+            }
+        }
+
+        function getReward() {
+            const head = snake[0];
+            if (head.x === food.x && head.y === food.y) return 10; // Eat food
+            if (head.x < 0 || head.x >= tileCount || head.y < 0 || head.y >= tileCount) return -10; // Hit wall
+            if (snake.slice(1).some(segment => segment.x === head.x && segment.y === head.y)) return -10; // Hit itself
+            return -0.1; // Default penalty for each step
+        }
+
+        function isGameOver() {
+            const head = snake[0];
+            return (
+                head.x < 0 || head.x >= tileCount ||
+                head.y < 0 || head.y >= tileCount ||
+                snake.slice(1).some(segment => segment.x === head.x && segment.y === head.y)
+            );
+        }
+
+        function update() {
+            const head = { x: snake[0].x + direction.x, y: snake[0].y + direction.y };
+            snake.unshift(head);
+
+            if (head.x === food.x && head.y === food.y) {
+                score++;
+                placeFood();
+            } else {
+                snake.pop();
+            }
+
+            gameOver = isGameOver();
+        }
+
+        function draw() {
+            ctx.fillStyle = "#fff";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            ctx.fillStyle = "#00f";
+            snake.forEach(segment => {
+                ctx.fillRect(segment.x * gridSize, segment.y * gridSize, gridSize, gridSize);
+            });
+
+            ctx.fillStyle = "#f00";
+            ctx.fillRect(food.x * gridSize, food.y * gridSize, gridSize, gridSize);
+
+            ctx.fillStyle = "#000";
+            ctx.font = "20px Arial";
+            ctx.fillText("Score: " + score, 10, 30);
+        }
+
+        function placeFood() {
+            food.x = Math.floor(Math.random() * tileCount);
+            food.y = Math.floor(Math.random() * tileCount);
+
+            if (snake.some(segment => segment.x === food.x && segment.y === food.y)) {
+                placeFood();
+            }
+        }
+
+        function resetGame() {
+            snake = [{ x: 10, y: 10 }];
+            direction = { x: 0, y: 0 };
+            score = 0;
+            gameOver = false;
+            placeFood();
+        }
+
+        async function train() {
+            let state = getState();
+            let action = chooseAction(state);
+            takeAction(action);
+
+            update();
+            const reward = getReward();
+            const nextState = getState();
+            const nextAction = chooseAction(nextState);
+
+            // Q-learning update
+            const target = reward + gamma * tf.tidy(() => {
+                const nextQValues = model.predict(nextState);
+                return nextQValues.max().dataSync()[0];
+            });
+
+            const targetQs = model.predict(state);
+            targetQs.dataSync()[action] = target;
+
+            await model.fit(state, targetQs, { epochs: 1 });
+
+            // Decay epsilon
+            if (epsilon > epsilonMin) {
+                epsilon *= epsilonDecay;
+            }
+
+            if (!gameOver) {
+                requestAnimationFrame(train);
+            } else {
+                resetGame();
+                requestAnimationFrame(train);
+            }
+
+            draw();
+        }
+
+        placeFood();
+        train();
+    </script>
+</body>
+</html>
