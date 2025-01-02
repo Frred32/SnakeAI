@@ -50,11 +50,25 @@
         model.add(tf.layers.dense({ units: 4, activation: 'linear' }));
         model.compile({ optimizer: tf.train.adam(0.001), loss: 'meanSquaredError' });
 
+        // Target Network
+        const targetModel = tf.sequential();
+        targetModel.add(tf.layers.dense({ units: 24, inputShape: [4], activation: 'relu' }));
+        targetModel.add(tf.layers.dense({ units: 24, activation: 'relu' }));
+        targetModel.add(tf.layers.dense({ units: 4, activation: 'linear' }));
+        targetModel.compile({ optimizer: tf.train.adam(0.001), loss: 'meanSquaredError' });
+
         // Hyperparameters
         const gamma = 0.95; // Discount factor
         let epsilon = 1.0; // Exploration rate
         const epsilonMin = 0.01;
         const epsilonDecay = 0.995;
+        const batchSize = 32;
+        const memorySize = 10000;
+        const updateTargetEvery = 10;
+
+        // Experience Replay Memory
+        let memory = [];
+        let gamesPlayed = 0;
 
         // Helper functions
         function getState() {
@@ -144,9 +158,53 @@
         function resetGame() {
             snake = [{ x: 10, y: 10 }];
             direction = { x: 0, y: 0 };
-            score = 0;
             gameOver = false;
             placeFood();
+        }
+
+        function remember(state, action, reward, nextState, done) {
+            memory.push({ state, action, reward, nextState, done });
+            if (memory.length > memorySize) {
+                memory.shift();
+            }
+        }
+
+        async function replay() {
+            if (memory.length < batchSize) return;
+
+            const batch = tf.tidy(() => {
+                const samples = memory.slice(-batchSize);
+                const states = tf.concat(samples.map(sample => sample.state));
+                const nextStates = tf.concat(samples.map(sample => sample.nextState));
+                const rewards = tf.tensor1d(samples.map(sample => sample.reward));
+                const actions = tf.tensor1d(samples.map(sample => sample.action), 'int32');
+                const dones = tf.tensor1d(samples.map(sample => sample.done ? 0 : 1));
+
+                const currentQ = model.predict(states);
+                const nextQ = targetModel.predict(nextStates);
+                const maxNextQ = nextQ.max(1);
+                const targetQ = rewards.add(maxNextQ.mul(gamma).mul(dones));
+
+                const targetQs = currentQ.arraySync();
+                for (let i = 0; i < batchSize; i++) {
+                    targetQs[i][actions.arraySync()[i]] = targetQ.arraySync()[i];
+                }
+
+                return { states, targetQs };
+            });
+
+            await model.fit(batch.states, batch.targetQs, { epochs: 1 });
+
+            // Decay epsilon
+            if (epsilon > epsilonMin) {
+                epsilon *= epsilonDecay;
+            }
+
+            // Update target network
+            gamesPlayed++;
+            if (gamesPlayed % updateTargetEvery === 0) {
+                targetModel.setWeights(model.getWeights());
+            }
         }
 
         async function train() {
@@ -157,23 +215,9 @@
             update();
             const reward = getReward();
             const nextState = getState();
-            const nextAction = chooseAction(nextState);
+            const done = isGameOver();
 
-            // Q-learning update
-            const target = reward + gamma * tf.tidy(() => {
-                const nextQValues = model.predict(nextState);
-                return nextQValues.max().dataSync()[0];
-            });
-
-            const targetQs = model.predict(state);
-            targetQs.dataSync()[action] = target;
-
-            await model.fit(state, targetQs, { epochs: 1 });
-
-            // Decay epsilon
-            if (epsilon > epsilonMin) {
-                epsilon *= epsilonDecay;
-            }
+            remember(state, action, reward, nextState, done);
 
             if (!gameOver) {
                 requestAnimationFrame(train);
@@ -182,6 +226,7 @@
                 requestAnimationFrame(train);
             }
 
+            await replay();
             draw();
         }
 
